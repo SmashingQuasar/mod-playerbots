@@ -16,6 +16,8 @@
  */
 
 #include "Playerbots.h"
+#include <cstdint>
+#include <unordered_set>
 
 #include "Channel.h"
 #include "Config.h"
@@ -24,12 +26,21 @@
 #include "GuildTaskMgr.h"
 #include "Metric.h"
 #include "PlayerScript.h"
+#include "GuildScript.h"
 #include "PlayerbotAIConfig.h"
+#include "PlayerbotGuildMgr.h"
+#include "PlayerbotSpellCache.h"
+#include "PlayerbotWorldThreadProcessor.h"
 #include "RandomPlayerbotMgr.h"
 #include "ScriptMgr.h"
 #include "cs_playerbots.h"
 #include "cmath"
 #include "BattleGroundTactics.h"
+#include "PlayerGuildRegistry.h"
+#include "Log.h"
+#include "PlayerGuildRegistry.h"
+#include "PlayerGuildRepository.h"
+#include "Guild.h"
 
 class PlayerbotsDatabaseScript : public DatabaseScript
 {
@@ -81,12 +92,12 @@ public:
     PlayerbotsPlayerScript() : PlayerScript("PlayerbotsPlayerScript", {
         PLAYERHOOK_ON_LOGIN,
         PLAYERHOOK_ON_AFTER_UPDATE,
-        PLAYERHOOK_ON_CHAT,
-        PLAYERHOOK_ON_CHAT_WITH_CHANNEL,
-        PLAYERHOOK_ON_CHAT_WITH_GROUP,
         PLAYERHOOK_ON_BEFORE_CRITERIA_PROGRESS,
         PLAYERHOOK_ON_BEFORE_ACHI_COMPLETE,
         PLAYERHOOK_CAN_PLAYER_USE_PRIVATE_CHAT,
+        PLAYERHOOK_CAN_PLAYER_USE_GROUP_CHAT,
+        PLAYERHOOK_CAN_PLAYER_USE_GUILD_CHAT,
+        PLAYERHOOK_CAN_PLAYER_USE_CHANNEL_CHAT,
         PLAYERHOOK_ON_GIVE_EXP,
         PLAYERHOOK_ON_BEFORE_TELEPORT
     }) {}
@@ -122,24 +133,49 @@ public:
         }
     }
 
-    bool OnPlayerBeforeTeleport(Player* player, uint32 mapid, float /*x*/, float /*y*/, float /*z*/, float /*orientation*/, uint32 /*options*/, Unit* /*target*/) override
+    bool OnPlayerBeforeTeleport(Player* /*player*/, uint32 /*mapid*/, float /*x*/, float /*y*/, float /*z*/, float /*orientation*/, uint32 /*options*/, Unit* /*target*/) override
     {
-        // Only apply to bots to prevent affecting real players
-        if (!player || !player->GetSession()->IsBot())
+        /* for now commmented out until proven its actually required
+        * havent seen any proof CleanVisibilityReferences() is needed
+
+        // If the player is not safe to touch, do nothing
+        if (!player)
             return true;
 
-        // If changing maps, proactively clean visibility references to prevent
-        // stale pointers in other players' visibility maps during the teleport.
-        // This fixes a race condition where:
-        // 1. Bot A teleports and its visible objects start getting cleaned up
-        // 2. Bot B is simultaneously updating visibility and tries to access objects in Bot A's old visibility map
-        // 3. Those objects may already be freed, causing a segmentation fault
-        if (player->GetMapId() != mapid && player->IsInWorld())
-        {
-            player->GetObjectVisibilityContainer().CleanVisibilityReferences();
-        }
+        // If same map or not in world do nothing
+        if (!player->IsInWorld() || player->GetMapId() == mapid)
+            return true;
 
-        return true;  // Allow teleport to continue
+        // If real player do nothing
+        PlayerbotAI* ai = GET_PLAYERBOT_AI(player);
+        if (!ai || ai->IsRealPlayer())
+            return true;
+
+        // Cross-map bot teleport: defer visibility reference cleanup.
+        // CleanVisibilityReferences() erases this bot's GUID from other objects' visibility containers.
+        // This is intentionally done via the event queue (instead of directly here) because erasing
+        // from other players' visibility maps inside the teleport call stack can hit unsafe re-entrancy
+        // or iterator invalidation while visibility updates are in progress
+        ObjectGuid guid = player->GetGUID();
+        player->m_Events.AddEventAtOffset(
+            [guid, mapid]()
+            {
+                // do nothing, if the player is not safe to touch
+                Player* p = ObjectAccessor::FindPlayer(guid);
+                if (!p || !p->IsInWorld() || p->IsDuringRemoveFromWorld())
+                    return;
+
+                // do nothing if we are already on the target map
+                if (p->GetMapId() == mapid)
+                    return;
+
+                p->GetObjectVisibilityContainer().CleanVisibilityReferences();
+            },
+            Milliseconds(0));
+
+        */
+
+        return true;
     }
 
     void OnPlayerAfterUpdate(Player* player, uint32 diff) override
@@ -163,14 +199,17 @@ public:
             {
                 botAI->HandleCommand(type, msg, player);
 
-                return false;
+                // hotfix; otherwise the server will crash when whispering logout
+                // https://github.com/mod-playerbots/mod-playerbots/pull/1838
+                // TODO: find the root cause and solve it. (does not happen in party chat)
+                if (msg == "logout")
+                    return false;
             }
         }
-
         return true;
     }
 
-    void OnPlayerChat(Player* player, uint32 type, uint32 /*lang*/, std::string& msg, Group* group) override
+    bool OnPlayerCanUseChat(Player* player, uint32 type, uint32 /*lang*/, std::string& msg, Group* group) override
     {
         for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
         {
@@ -182,9 +221,10 @@ public:
                 }
             }
         }
+        return true;
     }
 
-    void OnPlayerChat(Player* player, uint32 type, uint32 /*lang*/, std::string& msg) override
+    bool OnPlayerCanUseChat(Player* player, uint32 type, uint32 /*lang*/, std::string& msg, Guild* guild) override
     {
         if (type == CHAT_MSG_GUILD)
         {
@@ -203,9 +243,10 @@ public:
                 }
             }
         }
+        return true;
     }
 
-    void OnPlayerChat(Player* player, uint32 type, uint32 /*lang*/, std::string& msg, Channel* channel) override
+    bool OnPlayerCanUseChat(Player* player, uint32 type, uint32 /*lang*/, std::string& msg, Channel* channel) override
     {
         if (PlayerbotMgr* playerbotMgr = GET_PLAYERBOT_MGR(player))
         {
@@ -216,6 +257,7 @@ public:
         }
 
         sRandomPlayerbotMgr->HandleCommand(type, msg, player);
+        return true;
     }
 
     bool OnPlayerBeforeAchievementComplete(Player* player, AchievementEntry const* achievement) override
@@ -300,7 +342,8 @@ class PlayerbotsWorldScript : public WorldScript
 {
 public:
     PlayerbotsWorldScript() : WorldScript("PlayerbotsWorldScript", {
-        WORLDHOOK_ON_BEFORE_WORLD_INITIALIZED
+        WORLDHOOK_ON_BEFORE_WORLD_INITIALIZED,
+        WORLDHOOK_ON_UPDATE
     }) {}
 
     void OnBeforeWorldInitialized() override
@@ -329,6 +372,22 @@ public:
 
         LOG_INFO("server.loading", ">> Loaded playerbots config in {} ms", GetMSTimeDiffToNow(oldMSTime));
         LOG_INFO("server.loading", " ");
+
+        sPlayerbotSpellCache->Initialize();
+
+        LOG_INFO("server.loading", "Playerbots World Thread Processor initialized");
+
+        uint32_t beforeGuildRegistryInit = getMSTime();
+
+		sPlayerGuildRegistry.Initialize();
+
+        LOG_INFO("server.loading", ">> Initialized PlayerGuildRegistry in {} ms", GetMSTimeDiffToNow(beforeGuildRegistryInit));
+	}
+
+    void OnUpdate(uint32 diff) override
+    {
+        sPlayerbotWorldProcessor->Update(diff);
+        sRandomPlayerbotMgr->UpdateAI(diff);  // World thread only
     }
 };
 
@@ -390,8 +449,7 @@ public:
 
     void OnPlayerbotUpdate(uint32 diff) override
     {
-        sRandomPlayerbotMgr->UpdateAI(diff);
-        sRandomPlayerbotMgr->UpdateSessions();
+        sRandomPlayerbotMgr->UpdateSessions();  // Per-bot updates only
     }
 
     void OnPlayerbotUpdateSessions(Player* player) override
@@ -459,6 +517,83 @@ public:
     void OnBattlegroundEnd(Battleground* bg, TeamId /*winnerTeam*/) override { bgStrategies.erase(bg->GetInstanceID()); }
 };
 
+void AddPlayerbotsSecureLoginScripts();
+class PlayerbotsGuildScript : public GuildScript
+{
+	public:
+
+	PlayerbotsGuildScript() : GuildScript("PlayerbotsGuildScript") {}
+
+	void OnAddMember(Guild* guild, Player* player, [[maybe_unused]] uint8_t& plRank)
+	{
+		if (sRandomPlayerbotMgr->IsRandomBot(player))
+			return;
+
+		uint32_t guildId = guild->GetId();
+
+		if (sPlayerGuildRegistry.Contains(guildId))
+			return;
+
+		sPlayerGuildRegistry.Add(guildId);
+
+		LOG_DEBUG("playerbots", "Added guild with id {} to PlayerGuildRegistry because it now contains a non random bot.", guildId);
+	}
+
+	/**
+	 * @brief Handles the player guilds registry maintenance when a member is removed from a guild.
+	 *
+	 * This hook is executed BEFORE the member is removed within the core. This method handles this properly and already handles
+	 * the eventual change where the hook is being ran AFTER the removal making it future-proof.
+	 */
+	void OnGuildRemoveMember(Guild* guild, Player* player)
+	{
+		if (sRandomPlayerbotMgr->IsRandomBot(player))
+			return;
+
+		uint32_t guildId = guild->GetId();
+
+		if (!sPlayerGuildRegistry.Contains(guildId))
+			return;
+
+		// This does a non prepared database query. Since this event should be quite rare, it does not need to be overly optimised for now.
+		std::unordered_set<uint64_t> memberIds = sPlayerGuildRepository.GetGuildMembersIds(guildId);
+
+		uint64_t removedCharacterId = player->GetGUID().GetRawValue();
+
+		bool noNonRandomBotMember = memberIds.empty();
+		bool removedPlayerWasLastNonBotMember = memberIds.size() == 1 && memberIds.find(removedCharacterId) != memberIds.end();
+
+		if (noNonRandomBotMember || removedPlayerWasLastNonBotMember)
+		{
+			sPlayerGuildRegistry.Remove(guildId);
+		}
+	}
+
+	void OnGuildDisband(Guild* guild)
+	{
+		uint32_t guildId = guild->GetId();
+
+		if (!sPlayerGuildRegistry.Contains(guildId))
+			return;
+
+		sPlayerGuildRegistry.Remove(guildId);
+	}
+
+	void OnGuildCreate(Guild* guild, [[maybe_unused]] Player* leader, [[maybe_unused]] const std::string& name)
+	{
+		uint32_t guildId = guild->GetId();
+
+		std::unordered_set<uint64_t> memberIds = sPlayerGuildRepository.GetGuildMembersIds(guildId);
+
+		bool nonRandomBotMember = !memberIds.empty();
+
+		if (nonRandomBotMember)
+		{
+			sPlayerGuildRegistry.Add(guildId);
+		}
+	}
+};
+
 void AddPlayerbotsScripts()
 {
     new PlayerbotsDatabaseScript();
@@ -468,6 +603,9 @@ void AddPlayerbotsScripts()
     new PlayerbotsWorldScript();
     new PlayerbotsScript();
     new PlayerBotsBGScript();
+    AddPlayerbotsSecureLoginScripts();
+	new PlayerbotsGuildScript();
 
     AddSC_playerbots_commandscript();
+    PlayerBotsGuildValidationScript();
 }

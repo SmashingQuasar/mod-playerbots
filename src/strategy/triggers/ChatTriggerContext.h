@@ -126,7 +126,6 @@ public:
         creators["guild leave"] = &ChatTriggerContext::guild_leave;
         creators["rtsc"] = &ChatTriggerContext::rtsc;
         creators["drink"] = &ChatTriggerContext::drink;
-        // creators["naxx"] = &ChatTriggerContext::naxx;
         // creators["bwl"] = &ChatTriggerContext::bwl;
         creators["dps"] = &ChatTriggerContext::dps;
         creators["disperse"] = &ChatTriggerContext::disperse;
@@ -139,6 +138,7 @@ public:
         creators["pet"] = &ChatTriggerContext::pet;
         creators["pet attack"] = &ChatTriggerContext::pet_attack;
         creators["roll"] = &ChatTriggerContext::roll_action;
+        creators["manage inventory"] = &ChatTriggerContext::manage_inventory;
     }
 
 private:
@@ -244,7 +244,6 @@ private:
     static Trigger* guild_leave(PlayerbotAI* botAI) { return new ChatCommandTrigger(botAI, "guild leave"); }
     static Trigger* rtsc(PlayerbotAI* botAI) { return new ChatCommandTrigger(botAI, "rtsc"); }
     static Trigger* drink(PlayerbotAI* ai) { return new ChatCommandTrigger(ai, "drink"); }
-    // static Trigger* naxx(PlayerbotAI* ai) { return new ChatCommandTrigger(ai, "naxx"); }
     // static Trigger* bwl(PlayerbotAI* ai) { return new ChatCommandTrigger(ai, "bwl"); }
     static Trigger* dps(PlayerbotAI* ai) { return new ChatCommandTrigger(ai, "dps"); }
     static Trigger* disperse(PlayerbotAI* ai) { return new ChatCommandTrigger(ai, "disperse"); }
@@ -257,6 +256,7 @@ private:
     static Trigger* pet(PlayerbotAI* botAI) { return new ChatCommandTrigger(botAI, "pet"); }
     static Trigger* pet_attack(PlayerbotAI* botAI) { return new ChatCommandTrigger(botAI, "pet attack"); }
     static Trigger* roll_action(PlayerbotAI* botAI) { return new ChatCommandTrigger(botAI, "roll"); }
+    static Trigger* manage_inventory(PlayerbotAI* botAI) { return new ChatCommandTrigger(botAI, "manage inventory"); }
 };
 
 #endif

@@ -9,9 +9,10 @@
 #include <cstring>
 #include <istream>
 #include <string>
-#include <openssl/sha.h>
 #include <unordered_set>
+#include <openssl/sha.h>
 #include <iomanip>
+#include <algorithm>
 
 #include "ChannelMgr.h"
 #include "CharacterCache.h"
@@ -27,17 +28,17 @@
 #include "PlayerbotAIConfig.h"
 #include "PlayerbotDbStore.h"
 #include "PlayerbotFactory.h"
+#include "PlayerbotOperations.h"
 #include "PlayerbotSecurity.h"
+#include "PlayerbotWorldThreadProcessor.h"
 #include "Playerbots.h"
+#include "PlayerbotGuildMgr.h"
 #include "RandomPlayerbotMgr.h"
 #include "SharedDefines.h"
 #include "WorldSession.h"
-#include "ChannelMgr.h"
 #include "BroadcastHelper.h"
-#include "PlayerbotDbStore.h"
 #include "WorldSessionMgr.h"
-#include "DatabaseEnv.h"        // Added for gender choice
-#include <algorithm>            // Added for gender choice
+#include "DatabaseEnv.h"
 
 class BotInitGuard
 {
@@ -66,6 +67,7 @@ private:
 };
 
 std::unordered_set<ObjectGuid> BotInitGuard::botsBeingInitialized;
+std::unordered_set<ObjectGuid> PlayerbotHolder::botLoading;
 
 PlayerbotHolder::PlayerbotHolder() : PlayerbotAIBase(false) {}
 class PlayerbotLoginQueryHolder : public LoginQueryHolder
@@ -74,18 +76,16 @@ private:
     uint32 masterAccountId;
     PlayerbotHolder* playerbotHolder;
 public:
-    PlayerbotLoginQueryHolder(PlayerbotHolder* playerbotHolder, uint32 masterAccount, uint32 accountId, ObjectGuid guid)
-        : LoginQueryHolder(accountId, guid), masterAccountId(masterAccount), playerbotHolder(playerbotHolder)
+    PlayerbotLoginQueryHolder(uint32 masterAccount, uint32 accountId, ObjectGuid guid)
+        : LoginQueryHolder(accountId, guid), masterAccountId(masterAccount)
     {
     }
 
     uint32 GetMasterAccountId() const { return masterAccountId; }
-    PlayerbotHolder* GetPlayerbotHolder() { return playerbotHolder; }
 };
 
 void PlayerbotHolder::AddPlayerBot(ObjectGuid playerGuid, uint32 masterAccountId)
 {
-    // bot is loading
     if (botLoading.find(playerGuid) != botLoading.end())
         return;
 
@@ -142,7 +142,7 @@ void PlayerbotHolder::AddPlayerBot(ObjectGuid playerGuid, uint32 masterAccountId
         return;
     }
     std::shared_ptr<PlayerbotLoginQueryHolder> holder =
-        std::make_shared<PlayerbotLoginQueryHolder>(this, masterAccountId, accountId, playerGuid);
+        std::make_shared<PlayerbotLoginQueryHolder>(masterAccountId, accountId, playerGuid);
     if (!holder->Initialize())
     {
         return;
@@ -152,8 +152,27 @@ void PlayerbotHolder::AddPlayerBot(ObjectGuid playerGuid, uint32 masterAccountId
 
     // Always login in with world session to avoid race condition
     sWorld->AddQueryHolderCallback(CharacterDatabase.DelayQueryHolder(holder))
-        .AfterComplete([this](SQLQueryHolderBase const& holder)
-                        { HandlePlayerBotLoginCallback(static_cast<PlayerbotLoginQueryHolder const&>(holder)); });
+        .AfterComplete(
+            [](SQLQueryHolderBase const& queryHolder)
+            {
+                PlayerbotLoginQueryHolder const& holder = static_cast<PlayerbotLoginQueryHolder const&>(queryHolder);
+                PlayerbotHolder* mgr = sRandomPlayerbotMgr;  // could be null
+                uint32 masterAccountId = holder.GetMasterAccountId();
+
+                if (masterAccountId)
+                {
+                    // verify and find current world session of master
+                    WorldSession* masterSession = sWorldSessionMgr->FindSession(masterAccountId);
+                    Player* masterPlayer = masterSession ? masterSession->GetPlayer() : nullptr;
+                    if (masterPlayer)
+                        mgr = GET_PLAYERBOT_MGR(masterPlayer);
+                }
+
+                if (mgr)
+                    mgr->HandlePlayerBotLoginCallback(holder);
+                else
+                    PlayerbotHolder::botLoading.erase(holder.GetGuid());
+            });
 }
 
 bool PlayerbotHolder::IsAccountLinked(uint32 accountId, uint32 linkedAccountId)
@@ -168,8 +187,9 @@ void PlayerbotHolder::HandlePlayerBotLoginCallback(PlayerbotLoginQueryHolder con
     uint32 botAccountId = holder.GetAccountId();
     // At login DBC locale should be what the server is set to use by default (as spells etc are hardcoded to ENUS this
     // allows channels to work as intended)
-    WorldSession* botSession = new WorldSession(botAccountId, "", 0x0, nullptr, SEC_PLAYER, EXPANSION_WRATH_OF_THE_LICH_KING,
-                                                time_t(0), sWorld->GetDefaultDbcLocale(), 0, false, false, 0, true);
+    WorldSession* botSession =
+        new WorldSession(botAccountId, "", 0x0, nullptr, SEC_PLAYER, EXPANSION_WRATH_OF_THE_LICH_KING, time_t(0),
+                         sWorld->GetDefaultDbcLocale(), 0, false, false, 0, true);
 
     botSession->HandlePlayerLoginFromDB(holder);  // will delete lqh
 
@@ -180,24 +200,27 @@ void PlayerbotHolder::HandlePlayerBotLoginCallback(PlayerbotLoginQueryHolder con
         LOG_DEBUG("mod-playerbots", "Bot player could not be loaded for account ID: {}", botAccountId);
         botSession->LogoutPlayer(true);
         delete botSession;
-        botLoading.erase(holder.GetGuid());
+        PlayerbotHolder::botLoading.erase(holder.GetGuid());
+
         return;
     }
 
-    uint32 masterAccount = holder.GetMasterAccountId();
-    WorldSession* masterSession = masterAccount ? sWorldSessionMgr->FindSession(masterAccount) : nullptr;
+    uint32 masterAccountId = holder.GetMasterAccountId();
+    WorldSession* masterSession = masterAccountId ? sWorldSessionMgr->FindSession(masterAccountId) : nullptr;
 
     // Check if masterSession->GetPlayer() is valid
     Player* masterPlayer = masterSession ? masterSession->GetPlayer() : nullptr;
     if (masterSession && !masterPlayer)
     {
-        LOG_DEBUG("mod-playerbots", "Master session found but no player is associated for master account ID: {}", masterAccount);
+        LOG_DEBUG("mod-playerbots", "Master session found but no player is associated for master account ID: {}",
+                  masterAccountId);
     }
 
     sRandomPlayerbotMgr->OnPlayerLogin(bot);
-    OnBotLogin(bot);
+    auto op = std::make_unique<OnBotLoginOperation>(bot->GetGUID(), masterAccountId);
+    sPlayerbotWorldProcessor->QueueOperation(std::move(op));
 
-    botLoading.erase(holder.GetGuid());
+    PlayerbotHolder::botLoading.erase(holder.GetGuid());
 }
 
 void PlayerbotHolder::UpdateSessions()
@@ -316,11 +339,9 @@ void PlayerbotHolder::LogoutPlayerBot(ObjectGuid guid)
         if (!botAI)
             return;
 
-        Group* group = bot->GetGroup();
-        if (group && !bot->InBattleground() && !bot->InBattlegroundQueue() && botAI->HasActivePlayerMaster())
-        {
-            sPlayerbotDbStore->Save(botAI);
-        }
+        // Queue group cleanup operation for world thread
+        auto cleanupOp = std::make_unique<BotLogoutGroupCleanupOperation>(guid);
+        sPlayerbotWorldProcessor->QueueOperation(std::move(cleanupOp));
 
         LOG_DEBUG("playerbots", "Bot {} logging out", bot->GetName().c_str());
         bot->SaveToDB(false, false);
@@ -549,6 +570,7 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
 
     botAI->TellMaster("Hello!", PLAYERBOT_SECURITY_TALK);
 
+    // Queue group operations for world thread
     if (master && master->GetGroup() && !group)
     {
         Group* mgroup = master->GetGroup();
@@ -556,24 +578,29 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
         {
             if (!mgroup->isRaidGroup() && !mgroup->isLFGGroup() && !mgroup->isBGGroup() && !mgroup->isBFGroup())
             {
-                mgroup->ConvertToRaid();
+                // Queue ConvertToRaid operation
+                auto convertOp = std::make_unique<GroupConvertToRaidOperation>(master->GetGUID());
+                sPlayerbotWorldProcessor->QueueOperation(std::move(convertOp));
             }
             if (mgroup->isRaidGroup())
             {
-                mgroup->AddMember(bot);
+                // Queue AddMember operation
+                auto addOp = std::make_unique<GroupInviteOperation>(master->GetGUID(), bot->GetGUID());
+                sPlayerbotWorldProcessor->QueueOperation(std::move(addOp));
             }
         }
         else
         {
-            mgroup->AddMember(bot);
+            // Queue AddMember operation
+            auto addOp = std::make_unique<GroupInviteOperation>(master->GetGUID(), bot->GetGUID());
+            sPlayerbotWorldProcessor->QueueOperation(std::move(addOp));
         }
     }
     else if (master && !group)
     {
-        Group* newGroup = new Group();
-        newGroup->Create(master);
-        sGroupMgr->AddGroup(newGroup);
-        newGroup->AddMember(bot);
+        // Queue group creation and AddMember operation
+        auto inviteOp = std::make_unique<GroupInviteOperation>(master->GetGUID(), bot->GetGUID());
+        sPlayerbotWorldProcessor->QueueOperation(std::move(inviteOp));
     }
     // if (master)
     // {
@@ -1167,7 +1194,7 @@ std::vector<std::string> PlayerbotHolder::HandlePlayerbotCommand(char const* arg
             if (ObjectAccessor::FindConnectedPlayer(guid))
                 continue;
             uint32 guildId = sCharacterCache->GetCharacterGuildIdByGuid(guid);
-            if (guildId && PlayerbotAI::IsRealGuild(guildId))
+            if (guildId && sPlayerbotGuildMgr->IsRealGuild(guildId))
                 continue;
             AddPlayerBot(guid, master->GetSession()->GetAccountId());
             messages.push_back("Add class " + std::string(charname));
@@ -1602,8 +1629,26 @@ void PlayerbotMgr::OnBotLoginInternal(Player* const bot)
 
 void PlayerbotMgr::OnPlayerLogin(Player* player)
 {
+    if (!player)
+        return;
+
+    WorldSession* session = player->GetSession();
+    if (!session)
+    {
+        LOG_WARN("playerbots", "Unable to register locale priority for player {} because the session is missing", player->GetName());
+        return;
+    }
+
+    // DB locale (source of bot text translation)
+    LocaleConstant const databaseLocale = session->GetSessionDbLocaleIndex();
+
+    // For bot texts (DB-driven), prefer the database locale with a safe fallback.
+    LocaleConstant usedLocale = databaseLocale;
+    if (usedLocale >= MAX_LOCALES)
+        usedLocale = LOCALE_enUS; // fallback
+
     // set locale priority for bot texts
-    sPlayerbotTextMgr->AddLocalePriority(player->GetSession()->GetSessionDbcLocale());
+    sPlayerbotTextMgr->AddLocalePriority(usedLocale);
 
     if (sPlayerbotAIConfig->selfBotLevel > 2)
         HandlePlayerbotCommand("self", player);
@@ -1611,7 +1656,7 @@ void PlayerbotMgr::OnPlayerLogin(Player* player)
     if (!sPlayerbotAIConfig->botAutologin)
         return;
 
-    uint32 accountId = player->GetSession()->GetAccountId();
+    uint32 accountId = session->GetAccountId();
     QueryResult results = CharacterDatabase.Query("SELECT name FROM characters WHERE account = {}", accountId);
     if (results)
     {

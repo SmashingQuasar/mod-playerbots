@@ -38,6 +38,7 @@
 #include "LootStrategyAction.h"
 #include "LootRollAction.h"
 #include "MailAction.h"
+#include "ManageInventoryAction.h"
 #include "NamedObjectContext.h"
 #include "NewRpgAction.h"
 #include "PassLeadershipToMasterAction.h"
@@ -94,6 +95,9 @@ public:
         creators["unlock traded item"] = &ChatActionContext::unlock_traded_item;
         creators["range"] = &ChatActionContext::range;
         creators["stats"] = &ChatActionContext::stats;
+
+        creators["manage inventory"] = &ChatActionContext::manage_inventory;
+
         creators["quests"] = &ChatActionContext::quests;
         creators["leave"] = &ChatActionContext::leave;
         creators["reputation"] = &ChatActionContext::reputation;
@@ -185,7 +189,6 @@ public:
         creators["guild remove"] = &ChatActionContext::guild_remove;
         creators["guild leave"] = &ChatActionContext::guild_leave;
         creators["rtsc"] = &ChatActionContext::rtsc;
-        creators["naxx chat shortcut"] = &ChatActionContext::naxx_chat_shortcut;
         creators["bwl chat shortcut"] = &ChatActionContext::bwl_chat_shortcut;
         creators["tell estimated dps"] = &ChatActionContext::tell_estimated_dps;
         creators["join"] = &ChatActionContext::join;
@@ -277,6 +280,9 @@ private:
     static Action* clean_quest_log(PlayerbotAI* botAI) { return new CleanQuestLogAction(botAI); }
     static Action* share(PlayerbotAI* botAI) { return new ShareQuestAction(botAI); }
     static Action* stats(PlayerbotAI* botAI) { return new StatsAction(botAI); }
+
+    static Action* manage_inventory(PlayerbotAI* botAI) { return new ManageInventoryAction(botAI); }
+
     static Action* quests(PlayerbotAI* botAI) { return new ListQuestsAction(botAI); }
     static Action* leave(PlayerbotAI* botAI) { return new LeaveGroupAction(botAI); }
     static Action* reputation(PlayerbotAI* botAI) { return new TellReputationAction(botAI); }
@@ -298,7 +304,6 @@ private:
     static Action* guild_remove(PlayerbotAI* botAI) { return new GuildRemoveAction(botAI); }
     static Action* guild_leave(PlayerbotAI* botAI) { return new GuildLeaveAction(botAI); }
     static Action* rtsc(PlayerbotAI* botAI) { return new RTSCAction(botAI); }
-    static Action* naxx_chat_shortcut(PlayerbotAI* ai) { return new NaxxChatShortcutAction(ai); }
     static Action* bwl_chat_shortcut(PlayerbotAI* ai) { return new BwlChatShortcutAction(ai); }
     static Action* tell_estimated_dps(PlayerbotAI* ai) { return new TellEstimatedDpsAction(ai); }
     static Action* join(PlayerbotAI* ai) { return new JoinGroupAction(ai); }

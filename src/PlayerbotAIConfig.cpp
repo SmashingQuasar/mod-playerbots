@@ -10,6 +10,7 @@
 #include "PlayerbotDungeonSuggestionMgr.h"
 #include "PlayerbotFactory.h"
 #include "Playerbots.h"
+#include "PlayerbotGuildMgr.h"
 #include "RandomItemMgr.h"
 #include "RandomPlayerbotFactory.h"
 #include "RandomPlayerbotMgr.h"
@@ -165,7 +166,7 @@ bool PlayerbotAIConfig::Initialize()
         pvpProhibitedZoneIds);
     LoadList<std::vector<uint32>>(
         sConfigMgr->GetOption<std::string>("AiPlayerbot.PvpProhibitedAreaIds",
-                                           "976,35,392,2268,4161,4010,4317,4312,3649,3887,3958,3724,4080,3938,3754"),
+                                           "976,35,392,2268,4161,4010,4317,4312,3649,3887,3958,3724,4080,3938,3754,3786,3973"),
         pvpProhibitedAreaIds);
     fastReactInBG = sConfigMgr->GetOption<bool>("AiPlayerbot.FastReactInBG", true);
     LoadList<std::vector<uint32>>(
@@ -222,6 +223,11 @@ bool PlayerbotAIConfig::Initialize()
 
     EnableICCBuffs = sConfigMgr->GetOption<bool>("AiPlayerbot.EnableICCBuffs", true);
 
+    //////////////////////////// Professions
+    fishingDistanceFromMaster = sConfigMgr->GetOption<float>("AiPlayerbot.FishingDistanceFromMaster", 10.0f);
+    endFishingWithMaster = sConfigMgr->GetOption<float>("AiPlayerbot.EndFishingWithMaster", 30.0f);
+    fishingDistance = sConfigMgr->GetOption<float>("AiPlayerbot.FishingDistance", 40.0f);
+    enableFishingWithMaster = sConfigMgr->GetOption<bool>("AiPlayerbot.EnableFishingWithMaster", true);
     //////////////////////////// CHAT
     enableBroadcasts = sConfigMgr->GetOption<bool>("AiPlayerbot.EnableBroadcasts", true);
     randomBotTalk = sConfigMgr->GetOption<bool>("AiPlayerbot.RandomBotTalk", false);
@@ -647,6 +653,9 @@ bool PlayerbotAIConfig::Initialize()
 
     selfBotLevel = sConfigMgr->GetOption<int32>("AiPlayerbot.SelfBotLevel", 1);
 
+    disableRandomBotPeriodicRandomization = sConfigMgr->GetOption<bool>("AiPlayerbot.DisableRandomBotPeriodicRandomization", false);
+    disableRandomBotPeriodicTeleportation = sConfigMgr->GetOption<bool>("AiPlayerbot.DisableRandomBotPeriodicTeleportation", false);
+
     RandomPlayerbotFactory::CreateRandomBots();
     if (World::IsStopped())
     {
@@ -661,6 +670,7 @@ bool PlayerbotAIConfig::Initialize()
         sRandomPlayerbotMgr->Init();
     }
 
+    sPlayerbotGuildMgr->Init();
     sRandomItemMgr->Init();
     sRandomItemMgr->InitAfterAhBot();
     sPlayerbotTextMgr->LoadBotTexts();
@@ -725,8 +735,8 @@ std::string const PlayerbotAIConfig::GetTimestampStr()
     //       HH     hour (2 digits 00-23)
     //       MM     minutes (2 digits 00-59)
     //       SS     seconds (2 digits 00-59)
-    char buf[20];
-    snprintf(buf, 20, "%04d-%02d-%02d %02d-%02d-%02d", aTm->tm_year + 1900, aTm->tm_mon + 1, aTm->tm_mday, aTm->tm_hour,
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d-%02d-%02d", aTm->tm_year + 1900, aTm->tm_mon + 1, aTm->tm_mday, aTm->tm_hour,
              aTm->tm_min, aTm->tm_sec);
     return std::string(buf);
 }
